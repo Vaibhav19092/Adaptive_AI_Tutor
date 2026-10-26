@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Secrets and local config
+.env
+
+# Tools
+.pytest_cache/
+*.log
+
+# Future phases: local vector stores and databases
+data/
+*.sqlite
+*.db
+.env
+env.example
+.env.example
