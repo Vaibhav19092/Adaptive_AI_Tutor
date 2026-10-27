@@ -1,4 +1,4 @@
-"""Streamlit user interface for the Adaptive AI Tutor (Phase 2)."""
+"""Streamlit user interface for the Adaptive AI Tutor (Phase 3)."""
 
 import logging
 import sys
@@ -21,10 +21,24 @@ from adaptive_tutor.llm.provider import (  # noqa: E402
     describe_llm_error,
 )
 from adaptive_tutor.logging_setup import setup_logging  # noqa: E402
+from adaptive_tutor.research.search_provider import WebResult  # noqa: E402
 from adaptive_tutor.retrieval.vector_store import DocumentStore  # noqa: E402
 from adaptive_tutor.services import TutorServices, build_services  # noqa: E402
 
 st.set_page_config(page_title="Adaptive AI Tutor", page_icon="🎓")
+
+MODE_DOCUMENTS = "My documents"
+MODE_WEB = "Web research"
+MODE_GENERAL = "General knowledge"
+
+MODE_CAPTIONS = {
+    MODE_DOCUMENTS: "Answers come only from your uploaded documents, with sources.",
+    MODE_WEB: (
+        "Answers come only from web search results, with links. A short search query made "
+        "from your question is sent to the search service; your documents are never sent."
+    ),
+    MODE_GENERAL: "Answers come from the model's own knowledge, not your documents, so they can be wrong.",
+}
 
 try:
     settings = load_settings()
@@ -77,6 +91,36 @@ def add_uploaded_files(uploaded_files, store: DocumentStore) -> None:
                 st.success(f"Added {report.source}: {report.pages} page(s), {report.chunks} chunks.")
         finally:
             progress.empty()
+
+
+def safe_link(result: WebResult) -> str:
+    """A Markdown link that a strange title or URL can't break."""
+    title = result.title.replace("[", "(").replace("]", ")")
+    url = result.url.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
+    return f"[{title}]({url})"
+
+
+def show_web_sources(web_sources: list[WebResult], provider_name: str) -> None:
+    """List the web results the answer was built from, clearly marked as internet sources."""
+    with st.expander(f"Web sources ({len(web_sources)}) · from the internet", expanded=True):
+        st.caption("Internet sources can be wrong or out of date. Check important facts.")
+        for number, result in enumerate(web_sources, start=1):
+            st.markdown(
+                f"**[W{number}]** {safe_link(result)} · {result.domain} · "
+                f"{result.content_source} · quality {result.quality_score:.2f}"
+            )
+            st.caption(" · ".join(result.quality_notes))
+            st.caption(textwrap.shorten(result.content, width=300, placeholder=" ..."))
+        if provider_name == "Wikipedia":
+            st.caption("Wikipedia text is shared under the CC BY-SA licence; the links above credit each article.")
+
+
+def show_rejected_sources(rejected: list[WebResult]) -> None:
+    """Show which results were filtered out, and why, so the checks are easy to understand."""
+    with st.expander(f"Filtered out ({len(rejected)})"):
+        for result in rejected:
+            st.markdown(f"**{result.title}** · {result.domain or result.url}")
+            st.caption(" · ".join(result.quality_notes))
 
 
 try:
@@ -135,22 +179,40 @@ with st.sidebar:
             services.store.clear()
             st.rerun()
 
+    st.header("Web research")
+    provider = services.search_provider
+    if provider is None:
+        st.caption(
+            "Off. Nothing is sent to the internet. To turn it on, set RESEARCH_ENABLED=true "
+            "in .env (see the README) and restart the app."
+        )
+    else:
+        # No automatic test search here: it would use up free quota on every click.
+        st.info(
+            f"On, using **{provider.name}**. Search queries go to `{provider.destination}`. "
+            "Your documents are never sent."
+        )
+        if settings.research_fetch_pages:
+            st.caption("Page reading is on: result pages are opened only where their robots.txt allows it.")
+
 # ---------- Main area ----------
 st.title("🎓 Adaptive AI Tutor")
 
+modes = [MODE_DOCUMENTS, MODE_GENERAL]
+if services.search_provider is not None:
+    modes.insert(1, MODE_WEB)
+
 mode = st.radio(
     "Answer from",
-    ["My documents", "General knowledge"],
+    modes,
     horizontal=True,
-    help="My documents: answers only from your uploaded files, with sources. "
+    help="My documents: only your uploaded files, with sources. "
+    "Web research: only web search results, with links (when turned on). "
     "General knowledge: the model's own training, which can be wrong.",
 )
-use_documents = mode == "My documents"
-
-if use_documents:
-    st.caption("Answers come only from your uploaded documents, with sources.")
-else:
-    st.caption("Answers come from the model's own knowledge, not your documents, so they can be wrong.")
+use_documents = mode == MODE_DOCUMENTS
+use_web_research = mode == MODE_WEB
+st.caption(MODE_CAPTIONS[mode])
 
 with st.form("question_form"):
     question = st.text_area(
@@ -163,11 +225,21 @@ with st.form("question_form"):
 if submitted:
     with st.spinner("Thinking... local models on a CPU can take a while."):
         try:
-            result = ask_tutor(services.graph, question, use_documents=use_documents)
+            result = ask_tutor(
+                services.graph,
+                question,
+                use_documents=use_documents,
+                use_web_research=use_web_research,
+            )
         except Exception:  # noqa: BLE001 - safety net; nodes already handle known errors
             logger.exception("Unexpected workflow failure")
             st.error("Something unexpected went wrong. Check the terminal logs.")
             st.stop()
+
+    # Show exactly what left the computer, so web research is never hidden.
+    if result.get("search_query") and services.search_provider is not None:
+        sent_query = result["search_query"].replace("`", "'")
+        st.caption(f"Search query sent to {services.search_provider.name}: `{sent_query}`")
 
     if result.get("error"):
         st.error(result["error"])
@@ -179,15 +251,30 @@ if submitted:
                 f"The closest passage scored {best_score:.2f}; "
                 f"answers need at least {settings.min_relevance_score:.2f} (MIN_RELEVANCE_SCORE)."
             )
+            if services.search_provider is not None:
+                st.info("Tip: choose **Web research** above to look this up online instead.")
+        if "web_results_found" in result:
+            st.caption(
+                f"The search returned {result['web_results_found']} result(s); none passed the "
+                f"quality checks (RESEARCH_MIN_QUALITY = {settings.research_min_quality:.2f})."
+            )
     else:
         st.markdown(result["answer"])
 
     sources = result.get("sources") or []
     if sources and not result.get("error"):
-        with st.expander(f"Sources ({len(sources)})", expanded=True):
+        with st.expander(f"Document sources ({len(sources)}) · from your files", expanded=True):
             for number, chunk in enumerate(sources, start=1):
                 st.markdown(f"**[{number}] {chunk.citation}** · relevance {chunk.score:.2f}")
                 st.caption(textwrap.shorten(chunk.text, width=300, placeholder=" ..."))
+
+    web_sources = result.get("web_sources") or []
+    if web_sources and not result.get("error") and services.search_provider is not None:
+        show_web_sources(web_sources, services.search_provider.name)
+
+    rejected = result.get("rejected_web_sources") or []
+    if rejected and not result.get("error"):
+        show_rejected_sources(rejected)
 
     with st.expander("Show LangGraph workflow steps"):
         st.write(" → ".join(result.get("steps", [])))

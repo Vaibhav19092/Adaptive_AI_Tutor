@@ -1,0 +1,1 @@
+"""Optional external research: web search providers, page reading, and source checks."""

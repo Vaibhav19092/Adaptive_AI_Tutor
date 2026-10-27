@@ -4,8 +4,11 @@ from adaptive_tutor.graph.nodes import (
     make_validate_question_node,
     route_after_generation,
     route_after_retrieval,
+    route_after_search_query,
     route_after_validation,
+    route_after_web_search,
 )
+from adaptive_tutor.research.search_provider import WebResult
 from adaptive_tutor.retrieval.retriever import RetrievedChunk
 
 
@@ -63,3 +66,26 @@ def test_route_after_retrieval():
     assert route_after_retrieval({"sources": []}) == "report_insufficient_evidence"
     assert route_after_retrieval({}) == "report_insufficient_evidence"
     assert route_after_retrieval({"error": "bad"}) == "handle_error"
+
+
+# ---------- Phase 3 ----------
+
+def make_web_result() -> WebResult:
+    return WebResult(title="Cell", url="https://en.wikipedia.org/wiki/Cell", content="Cells...", provider="Wikipedia", rank=1)
+
+
+def test_route_after_validation_in_web_mode():
+    assert route_after_validation({"question": "ok", "use_web_research": True}) == "generate_search_query"
+    assert route_after_validation({"error": "bad", "use_web_research": True}) == "handle_error"
+
+
+def test_route_after_search_query():
+    assert route_after_search_query({"search_query": "cells"}) == "search_web"
+    assert route_after_search_query({"error": "bad"}) == "handle_error"
+
+
+def test_route_after_web_search():
+    assert route_after_web_search({"web_sources": [make_web_result()]}) == "generate_web_answer"
+    assert route_after_web_search({"web_sources": []}) == "report_no_web_results"
+    assert route_after_web_search({}) == "report_no_web_results"
+    assert route_after_web_search({"error": "bad"}) == "handle_error"

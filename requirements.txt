@@ -12,3 +12,6 @@ langchain-text-splitters>=0.3.8,<2.0
 langchain-chroma>=0.2.4,<2.0
 chromadb>=0.5,<2.0
 pypdf>=5.0,<7.0
+
+# Phase 3: no new packages. Web research uses httpx (above) and Python's
+# standard library (html.parser, urllib.robotparser).
