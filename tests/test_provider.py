@@ -6,6 +6,7 @@ from adaptive_tutor.llm import provider
 from adaptive_tutor.llm.provider import (
     ModelNotFoundError,
     OllamaUnavailableError,
+    check_embedding_model_available,
     check_model_available,
     describe_llm_error,
     normalize_model_name,
@@ -49,9 +50,22 @@ def test_check_model_available_raises_when_missing(monkeypatch, settings):
         check_model_available(settings)
 
 
+def test_check_embedding_model_names_the_embedding_model(monkeypatch, settings):
+    # Only the chat model is installed, so the embedding check must fail.
+    monkeypatch.setattr(provider, "list_installed_models", lambda base_url: ["test-model:latest"])
+    with pytest.raises(ModelNotFoundError, match="ollama pull nomic-embed-text"):
+        check_embedding_model_available(settings)
+
+
 def test_describe_missing_model_error(settings):
     message = describe_llm_error(ResponseError("model 'test-model' not found", 404), settings)
     assert "ollama pull" in message
+
+
+def test_describe_error_can_name_the_embedding_model(settings):
+    error = ResponseError("model not found", 404)
+    message = describe_llm_error(error, settings, model_name="nomic-embed-text")
+    assert "ollama pull nomic-embed-text" in message
 
 
 def test_describe_connection_error(settings):

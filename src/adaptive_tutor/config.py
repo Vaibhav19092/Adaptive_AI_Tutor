@@ -4,22 +4,47 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+# This file is src/adaptive_tutor/config.py, so parents[2] is the project folder.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)
 class Settings:
     """All configurable values in one place. frozen=True means read-only."""
 
+    # Phase 1: the chat model
     ollama_base_url: str
     ollama_model: str
     temperature: float
     request_timeout_seconds: float
     max_question_length: int
     log_level: str
+    context_window: int = 4096
+
+    # Phase 2: documents, embeddings, and retrieval
+    embedding_model: str = "nomic-embed-text"
+    embedding_query_prefix: str = "search_query:"
+    embedding_document_prefix: str = "search_document:"
+    chroma_persist_dir: Path = PROJECT_ROOT / "data" / "chroma"
+    chroma_collection: str = "learning_documents"
+    chunk_size: int = 800
+    chunk_overlap: int = 150
+    retrieval_top_k: int = 4
+    min_relevance_score: float = 0.5
+    max_upload_mb: float = 20.0
+
+
+def _read_text(name: str, default: str, allow_empty: bool = False) -> str:
+    value = os.getenv(name, default).strip()
+    if not value and not allow_empty:
+        raise ValueError(f"{name} must not be empty")
+    return value
 
 
 def _read_float(name: str, default: float) -> float:
@@ -38,6 +63,12 @@ def _read_int(name: str, default: int) -> int:
         raise ValueError(f"{name} must be a whole number, got {raw_value!r}") from exc
 
 
+def _resolve_path(raw_path: str) -> Path:
+    """Relative paths are placed inside the project folder, wherever you run from."""
+    path = Path(raw_path).expanduser()
+    return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+
+
 def load_settings(use_dotenv: bool = True) -> Settings:
     """Read settings from the environment, validating each value.
 
@@ -46,9 +77,8 @@ def load_settings(use_dotenv: bool = True) -> Settings:
     if use_dotenv:
         load_dotenv()
 
-    model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b").strip()
-    if not model:
-        raise ValueError("OLLAMA_MODEL must not be empty")
+    # ----- Phase 1 -----
+    model = _read_text("OLLAMA_MODEL", "llama3.2:3b")
 
     temperature = _read_float("OLLAMA_TEMPERATURE", 0.3)
     if not 0.0 <= temperature <= 2.0:
@@ -68,6 +98,38 @@ def load_settings(use_dotenv: bool = True) -> Settings:
 
     base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip().rstrip("/")
 
+    context_window = _read_int("OLLAMA_NUM_CTX", 4096)
+    if context_window < 512:
+        raise ValueError("OLLAMA_NUM_CTX must be at least 512")
+
+    # ----- Phase 2 -----
+    embedding_model = _read_text("EMBEDDING_MODEL", "nomic-embed-text")
+    query_prefix = _read_text("EMBEDDING_QUERY_PREFIX", "search_query:", allow_empty=True)
+    document_prefix = _read_text("EMBEDDING_DOCUMENT_PREFIX", "search_document:", allow_empty=True)
+
+    persist_dir = _resolve_path(_read_text("CHROMA_PERSIST_DIR", "data/chroma"))
+    collection = _read_text("CHROMA_COLLECTION", "learning_documents")
+
+    chunk_size = _read_int("CHUNK_SIZE", 800)
+    if chunk_size < 100:
+        raise ValueError("CHUNK_SIZE must be at least 100 characters")
+
+    chunk_overlap = _read_int("CHUNK_OVERLAP", 150)
+    if not 0 <= chunk_overlap < chunk_size:
+        raise ValueError("CHUNK_OVERLAP must be 0 or more and smaller than CHUNK_SIZE")
+
+    top_k = _read_int("RETRIEVAL_TOP_K", 4)
+    if not 1 <= top_k <= 20:
+        raise ValueError("RETRIEVAL_TOP_K must be between 1 and 20")
+
+    min_score = _read_float("MIN_RELEVANCE_SCORE", 0.5)
+    if not 0.0 <= min_score <= 1.0:
+        raise ValueError("MIN_RELEVANCE_SCORE must be between 0.0 and 1.0")
+
+    max_upload_mb = _read_float("MAX_UPLOAD_MB", 20.0)
+    if max_upload_mb <= 0:
+        raise ValueError("MAX_UPLOAD_MB must be greater than 0")
+
     return Settings(
         ollama_base_url=base_url,
         ollama_model=model,
@@ -75,4 +137,15 @@ def load_settings(use_dotenv: bool = True) -> Settings:
         request_timeout_seconds=timeout,
         max_question_length=max_length,
         log_level=log_level,
+        context_window=context_window,
+        embedding_model=embedding_model,
+        embedding_query_prefix=query_prefix,
+        embedding_document_prefix=document_prefix,
+        chroma_persist_dir=persist_dir,
+        chroma_collection=collection,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        retrieval_top_k=top_k,
+        min_relevance_score=min_score,
+        max_upload_mb=max_upload_mb,
     )

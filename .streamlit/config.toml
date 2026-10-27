@@ -1,6 +1,6 @@
 # Keep the app private: only reachable from this computer, no usage stats sent.
 [server]
-address = "localhost"
+address = "127.0.0.1"
 
 [browser]
 gatherUsageStats = false

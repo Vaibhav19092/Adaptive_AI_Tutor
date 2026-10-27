@@ -55,19 +55,29 @@ def list_installed_models(base_url: str) -> list[str]:
     return [model.get("name", "") for model in data.get("models", [])]
 
 
-def check_model_available(settings: Settings) -> None:
-    """Raise a helpful error if Ollama is down or the model is missing."""
-    installed = list_installed_models(settings.ollama_base_url)
-    wanted = normalize_model_name(settings.ollama_model)
+def check_model_installed(base_url: str, model_name: str) -> None:
+    """Raise a helpful error if Ollama is down or this model is missing."""
+    installed = list_installed_models(base_url)
+    wanted = normalize_model_name(model_name)
     installed_normalized = {normalize_model_name(name) for name in installed if name}
 
     if wanted not in installed_normalized:
         installed_text = ", ".join(sorted(installed_normalized)) or "none"
         raise ModelNotFoundError(
-            f"Model '{settings.ollama_model}' is not installed. "
-            f"Run: ollama pull {settings.ollama_model} "
+            f"Model '{model_name}' is not installed. "
+            f"Run: ollama pull {model_name} "
             f"(installed models: {installed_text})"
         )
+
+
+def check_model_available(settings: Settings) -> None:
+    """Check the chat model (the one that writes answers)."""
+    check_model_installed(settings.ollama_base_url, settings.ollama_model)
+
+
+def check_embedding_model_available(settings: Settings) -> None:
+    """Check the embedding model (the one that turns text into numbers)."""
+    check_model_installed(settings.ollama_base_url, settings.embedding_model)
 
 
 def create_chat_model(settings: Settings) -> ChatOllama:
@@ -77,21 +87,26 @@ def create_chat_model(settings: Settings) -> ChatOllama:
         model=settings.ollama_model,
         base_url=settings.ollama_base_url,
         temperature=settings.temperature,
+        # Ollama's own default context can be as small as 2048 tokens, which
+        # silently cuts off long prompts. Document answers need more room.
+        num_ctx=settings.context_window,
         client_kwargs={"timeout": settings.request_timeout_seconds},
     )
 
 
-def describe_llm_error(exc: Exception, settings: Settings) -> str:
-    """Translate a technical exception into a message a learner can act on."""
+def describe_llm_error(exc: Exception, settings: Settings, model_name: str | None = None) -> str:
+    """Translate a technical exception into a message a learner can act on.
+
+    model_name lets callers name the embedding model instead of the chat model.
+    """
+    name = model_name or settings.ollama_model
+
     if isinstance(exc, LLMError):
         return str(exc)
 
     if isinstance(exc, ResponseError):
         if exc.status_code == 404 or "not found" in str(exc.error).lower():
-            return (
-                f"Model '{settings.ollama_model}' is not installed. "
-                f"Run: ollama pull {settings.ollama_model}"
-            )
+            return f"Model '{name}' is not installed. Run: ollama pull {name}"
         return f"Ollama returned an error: {exc.error}"
 
     if isinstance(exc, httpx.TimeoutException):
