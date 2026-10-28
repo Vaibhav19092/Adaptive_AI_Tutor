@@ -66,6 +66,15 @@ class Settings:
     max_retrieval_retries: int = 1
     max_answer_retries: int = 1
 
+    # Phase 5: lessons and quizzes
+    structured_output_retries: int = 1  # extra tries when the model's JSON is unusable
+    quiz_multiple_choice: int = 3  # multiple-choice questions per quiz
+    quiz_short_answer: int = 1  # short-answer questions per quiz
+
+    # Phase 7: saved progress (two SQLite files on this computer)
+    database_path: Path = PROJECT_ROOT / "data" / "tutor.sqlite"
+    checkpoint_path: Path = PROJECT_ROOT / "data" / "checkpoints.sqlite"
+
 
 def _read_text(name: str, default: str, allow_empty: bool = False) -> str:
     value = os.getenv(name, default).strip()
@@ -228,6 +237,28 @@ def load_settings(use_dotenv: bool = True) -> Settings:
     if not 0 <= max_answer_retries <= 2:
         raise ValueError("MAX_ANSWER_RETRIES must be between 0 and 2")
 
+    # ----- Phase 5 -----
+    structured_output_retries = _read_int("STRUCTURED_OUTPUT_RETRIES", 1)
+    if not 0 <= structured_output_retries <= 2:
+        raise ValueError("STRUCTURED_OUTPUT_RETRIES must be between 0 and 2")
+
+    quiz_multiple_choice = _read_int("QUIZ_MULTIPLE_CHOICE", 3)
+    if not 0 <= quiz_multiple_choice <= 5:
+        raise ValueError("QUIZ_MULTIPLE_CHOICE must be between 0 and 5")
+
+    quiz_short_answer = _read_int("QUIZ_SHORT_ANSWER", 1)
+    if not 0 <= quiz_short_answer <= 3:
+        raise ValueError("QUIZ_SHORT_ANSWER must be between 0 and 3")
+
+    if quiz_multiple_choice + quiz_short_answer == 0:
+        raise ValueError("QUIZ_MULTIPLE_CHOICE and QUIZ_SHORT_ANSWER can't both be 0: a quiz needs a question")
+
+    # ----- Phase 7 -----
+    database_path = _resolve_path(_read_text("DATABASE_PATH", "data/tutor.sqlite"))
+    checkpoint_path = _resolve_path(_read_text("CHECKPOINT_PATH", "data/checkpoints.sqlite"))
+    if database_path == checkpoint_path:
+        raise ValueError("DATABASE_PATH and CHECKPOINT_PATH must be two different files")
+
     # Some settings are only required once research is switched on.
     if research_enabled and search_provider == "tavily" and not tavily_key:
         raise ValueError(
@@ -271,4 +302,9 @@ def load_settings(use_dotenv: bool = True) -> Settings:
         research_blocked_domains=blocked_domains,
         max_retrieval_retries=max_retrieval_retries,
         max_answer_retries=max_answer_retries,
+        structured_output_retries=structured_output_retries,
+        quiz_multiple_choice=quiz_multiple_choice,
+        quiz_short_answer=quiz_short_answer,
+        database_path=database_path,
+        checkpoint_path=checkpoint_path,
     )

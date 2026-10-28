@@ -15,3 +15,10 @@ pypdf>=5.0,<7.0
 
 # Phase 3: no new packages. Web research uses httpx (above) and Python's
 # standard library (html.parser, urllib.robotparser).
+
+# Phase 4: no new packages.
+
+# Phases 5-9: one new package. It saves LangGraph checkpoints in SQLite, so a
+# paused quiz survives restarting the app. Lessons and quizzes use Python's json
+# and dataclasses; the progress database uses Python's built-in sqlite3.
+langgraph-checkpoint-sqlite>=3.0,<4.0

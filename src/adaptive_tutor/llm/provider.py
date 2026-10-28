@@ -80,13 +80,24 @@ def check_embedding_model_available(settings: Settings) -> None:
     check_model_installed(settings.ollama_base_url, settings.embedding_model)
 
 
-def create_chat_model(settings: Settings) -> ChatOllama:
-    """Build the LangChain chat model. This does not contact Ollama yet."""
-    logger.info("Creating ChatOllama client for model '%s'", settings.ollama_model)
+# JSON replies (lessons, quizzes, grading) need a calm, predictable model.
+JSON_MAX_TEMPERATURE = 0.2
+
+
+def create_chat_model(settings: Settings, json_mode: bool = False) -> ChatOllama:
+    """Build the LangChain chat model. This does not contact Ollama yet.
+
+    json_mode=True (Phase 5) asks Ollama to reply with valid JSON only. It is used
+    for lessons, quizzes, and grading, where the app must read the reply as data.
+    """
+    logger.info("Creating ChatOllama client for model '%s' (json_mode=%s)", settings.ollama_model, json_mode)
+    extra = {"format": "json"} if json_mode else {}
+    temperature = min(settings.temperature, JSON_MAX_TEMPERATURE) if json_mode else settings.temperature
     return ChatOllama(
         model=settings.ollama_model,
         base_url=settings.ollama_base_url,
-        temperature=settings.temperature,
+        temperature=temperature,
+        **extra,
         # Ollama's own default context can be as small as 2048 tokens, which
         # silently cuts off long prompts. Document answers need more room.
         num_ctx=settings.context_window,

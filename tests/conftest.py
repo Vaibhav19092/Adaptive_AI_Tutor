@@ -1,10 +1,14 @@
 """Shared test fixtures."""
 
 from collections.abc import Callable
+from datetime import date
 
 import pytest
 
 from adaptive_tutor.config import Settings
+
+# Phase 5-9 tests use a fixed "today", so review dates are predictable.
+TODAY = date(2026, 10, 28)
 
 
 @pytest.fixture
@@ -60,3 +64,16 @@ def build_pdf(page_texts: list[str]) -> bytes:
 @pytest.fixture
 def make_pdf() -> Callable[[list[str]], bytes]:
     return build_pdf
+
+
+@pytest.fixture
+def repository(tmp_path):
+    """Phase 7: a real SQLite progress database in a temporary folder."""
+    from adaptive_tutor.memory.repository import LearnerRepository
+
+    return LearnerRepository(tmp_path / "tutor.sqlite")
+
+
+@pytest.fixture
+def today() -> date:
+    return TODAY

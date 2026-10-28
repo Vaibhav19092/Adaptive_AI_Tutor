@@ -33,6 +33,11 @@ ENV_VARS = [
     "RESEARCH_BLOCKED_DOMAINS",
     "MAX_RETRIEVAL_RETRIES",
     "MAX_ANSWER_RETRIES",
+    "STRUCTURED_OUTPUT_RETRIES",
+    "QUIZ_MULTIPLE_CHOICE",
+    "QUIZ_SHORT_ANSWER",
+    "DATABASE_PATH",
+    "CHECKPOINT_PATH",
 ]
 
 
@@ -247,4 +252,53 @@ def test_retry_limits_cannot_be_too_large(monkeypatch):
 def test_answer_retry_limit_cannot_be_negative(monkeypatch):
     monkeypatch.setenv("MAX_ANSWER_RETRIES", "-1")
     with pytest.raises(ValueError, match="MAX_ANSWER_RETRIES"):
+        load_settings(use_dotenv=False)
+
+
+# ---------- Phases 5-7 ----------
+
+def test_phase5_and_phase7_defaults():
+    settings = load_settings(use_dotenv=False)
+    assert settings.structured_output_retries == 1
+    assert (settings.quiz_multiple_choice, settings.quiz_short_answer) == (3, 1)
+    assert settings.database_path == PROJECT_ROOT / "data" / "tutor.sqlite"
+    assert settings.checkpoint_path == PROJECT_ROOT / "data" / "checkpoints.sqlite"
+
+
+def test_quiz_sizes_are_read_from_environment(monkeypatch):
+    monkeypatch.setenv("QUIZ_MULTIPLE_CHOICE", "0")
+    monkeypatch.setenv("QUIZ_SHORT_ANSWER", "2")
+    monkeypatch.setenv("STRUCTURED_OUTPUT_RETRIES", "2")
+    settings = load_settings(use_dotenv=False)
+    assert (settings.quiz_multiple_choice, settings.quiz_short_answer, settings.structured_output_retries) == (0, 2, 2)
+
+
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("STRUCTURED_OUTPUT_RETRIES", "3"),
+        ("STRUCTURED_OUTPUT_RETRIES", "-1"),
+        ("QUIZ_MULTIPLE_CHOICE", "6"),
+        ("QUIZ_SHORT_ANSWER", "4"),
+        ("QUIZ_SHORT_ANSWER", "lots"),
+    ],
+)
+def test_invalid_phase5_values_are_rejected(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=name):
+        load_settings(use_dotenv=False)
+
+
+def test_a_quiz_needs_at_least_one_question(monkeypatch):
+    monkeypatch.setenv("QUIZ_MULTIPLE_CHOICE", "0")
+    monkeypatch.setenv("QUIZ_SHORT_ANSWER", "0")
+    with pytest.raises(ValueError, match="can't both be 0"):
+        load_settings(use_dotenv=False)
+
+
+def test_database_paths_are_resolved_and_must_differ(monkeypatch):
+    monkeypatch.setenv("DATABASE_PATH", "elsewhere/progress.sqlite")
+    assert load_settings(use_dotenv=False).database_path == (PROJECT_ROOT / "elsewhere" / "progress.sqlite").resolve()
+    monkeypatch.setenv("CHECKPOINT_PATH", "elsewhere/progress.sqlite")
+    with pytest.raises(ValueError, match="two different files"):
         load_settings(use_dotenv=False)
