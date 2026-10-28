@@ -53,3 +53,18 @@ def test_retriever_converts_distances_and_sorts_best_first():
 def test_format_context_numbers_each_passage():
     context = format_context([make_chunk("a.pdf", 1, "First."), make_chunk("b.txt", None, "Second.")])
     assert context == "[1] (a.pdf, page 1)\nFirst.\n\n[2] (b.txt)\nSecond."
+
+
+def test_retriever_can_search_wider_for_corrective_retries():
+    asked_for: list[int] = []
+
+    class FakeStore:
+        def similarity_search(self, query, k):
+            asked_for.append(k)
+            return []
+
+    retriever = DocumentRetriever(FakeStore(), top_k=4)
+    retriever.search("question")
+    retriever.search("better question", top_k=8)
+
+    assert asked_for == [4, 8]

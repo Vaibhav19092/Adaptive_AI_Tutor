@@ -31,6 +31,8 @@ ENV_VARS = [
     "RESEARCH_FETCH_PAGES",
     "RESEARCH_MIN_QUALITY",
     "RESEARCH_BLOCKED_DOMAINS",
+    "MAX_RETRIEVAL_RETRIES",
+    "MAX_ANSWER_RETRIES",
 ]
 
 
@@ -217,4 +219,32 @@ def test_searxng_url_must_be_a_web_address(monkeypatch):
 def test_contact_must_be_one_plain_line(monkeypatch):
     monkeypatch.setenv("RESEARCH_CONTACT", "me@example.com\nX-Injected: 1")
     with pytest.raises(ValueError, match="RESEARCH_CONTACT"):
+        load_settings(use_dotenv=False)
+
+
+# ---------- Phase 4 ----------
+
+def test_retry_limits_have_safe_defaults():
+    settings = load_settings(use_dotenv=False)
+    assert settings.max_retrieval_retries == 1
+    assert settings.max_answer_retries == 1
+
+
+def test_retry_limits_are_read(monkeypatch):
+    monkeypatch.setenv("MAX_RETRIEVAL_RETRIES", "0")
+    monkeypatch.setenv("MAX_ANSWER_RETRIES", "2")
+    settings = load_settings(use_dotenv=False)
+    assert settings.max_retrieval_retries == 0
+    assert settings.max_answer_retries == 2
+
+
+def test_retry_limits_cannot_be_too_large(monkeypatch):
+    monkeypatch.setenv("MAX_RETRIEVAL_RETRIES", "5")
+    with pytest.raises(ValueError, match="MAX_RETRIEVAL_RETRIES"):
+        load_settings(use_dotenv=False)
+
+
+def test_answer_retry_limit_cannot_be_negative(monkeypatch):
+    monkeypatch.setenv("MAX_ANSWER_RETRIES", "-1")
+    with pytest.raises(ValueError, match="MAX_ANSWER_RETRIES"):
         load_settings(use_dotenv=False)

@@ -62,6 +62,10 @@ class Settings:
     research_min_quality: float = 0.4
     research_blocked_domains: tuple[str, ...] = ()
 
+    # Phase 4: Self-RAG and Corrective RAG (limits that keep every loop short)
+    max_retrieval_retries: int = 1
+    max_answer_retries: int = 1
+
 
 def _read_text(name: str, default: str, allow_empty: bool = False) -> str:
     value = os.getenv(name, default).strip()
@@ -215,6 +219,15 @@ def load_settings(use_dotenv: bool = True) -> Settings:
 
     blocked_domains = _read_domain_list("RESEARCH_BLOCKED_DOMAINS")
 
+    # ----- Phase 4 -----
+    max_retrieval_retries = _read_int("MAX_RETRIEVAL_RETRIES", 1)
+    if not 0 <= max_retrieval_retries <= 2:
+        raise ValueError("MAX_RETRIEVAL_RETRIES must be between 0 and 2")
+
+    max_answer_retries = _read_int("MAX_ANSWER_RETRIES", 1)
+    if not 0 <= max_answer_retries <= 2:
+        raise ValueError("MAX_ANSWER_RETRIES must be between 0 and 2")
+
     # Some settings are only required once research is switched on.
     if research_enabled and search_provider == "tavily" and not tavily_key:
         raise ValueError(
@@ -256,4 +269,6 @@ def load_settings(use_dotenv: bool = True) -> Settings:
         research_fetch_pages=fetch_pages,
         research_min_quality=min_quality,
         research_blocked_domains=blocked_domains,
+        max_retrieval_retries=max_retrieval_retries,
+        max_answer_retries=max_answer_retries,
     )

@@ -46,7 +46,7 @@ class Retriever(Protocol):
 
     def document_count(self) -> int: ...
 
-    def search(self, question: str) -> list[RetrievedChunk]: ...
+    def search(self, question: str, top_k: int | None = None) -> list[RetrievedChunk]: ...
 
 
 def distance_to_relevance(distance: float) -> float:
@@ -64,8 +64,9 @@ class DocumentRetriever:
     def document_count(self) -> int:
         return self._store.count()
 
-    def search(self, question: str) -> list[RetrievedChunk]:
-        results = self._store.similarity_search(question, k=self._top_k)
+    def search(self, question: str, top_k: int | None = None) -> list[RetrievedChunk]:
+        """top_k=None uses the normal RETRIEVAL_TOP_K. Corrective retries ask for more."""
+        results = self._store.similarity_search(question, k=top_k or self._top_k)
         chunks = [RetrievedChunk.from_document(doc, distance_to_relevance(distance)) for doc, distance in results]
         return sorted(chunks, key=lambda chunk: chunk.score, reverse=True)
 

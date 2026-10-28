@@ -1,4 +1,4 @@
-"""Streamlit user interface for the Adaptive AI Tutor (Phase 3)."""
+"""Streamlit user interface for the Adaptive AI Tutor (Phase 4)."""
 
 import logging
 import sys
@@ -214,6 +214,24 @@ use_documents = mode == MODE_DOCUMENTS
 use_web_research = mode == MODE_WEB
 st.caption(MODE_CAPTIONS[mode])
 
+# Phase 4: Self-RAG checks (on by default) and the optional web fallback (off by default).
+check_evidence = False
+allow_web_fallback = False
+if mode != MODE_GENERAL:
+    check_evidence = st.checkbox(
+        "Check evidence and answers carefully (Self-RAG)",
+        value=True,
+        help="The tutor grades each passage, checks the evidence is enough, searches again "
+        "with a better query if needed, and checks the answer against the sources. "
+        "Safer but slower: several extra calls to the local model.",
+    )
+    if use_documents and check_evidence and services.search_provider is not None:
+        allow_web_fallback = st.checkbox(
+            f"If my documents don't cover it, search {services.search_provider.name}",
+            value=False,
+            help="Only a short search query is sent. Your documents are never sent.",
+        )
+
 with st.form("question_form"):
     question = st.text_area(
         "Ask a question",
@@ -230,6 +248,8 @@ if submitted:
                 question,
                 use_documents=use_documents,
                 use_web_research=use_web_research,
+                check_evidence=check_evidence,
+                allow_web_fallback=allow_web_fallback,
             )
         except Exception:  # noqa: BLE001 - safety net; nodes already handle known errors
             logger.exception("Unexpected workflow failure")
@@ -246,7 +266,8 @@ if submitted:
     elif result.get("insufficient_evidence"):
         st.warning(result["answer"])
         best_score = result.get("best_score")
-        if best_score is not None:
+        # The score hint only helps when no passage was usable at all.
+        if best_score is not None and not result.get("sources") and not result.get("used_web_fallback"):
             st.caption(
                 f"The closest passage scored {best_score:.2f}; "
                 f"answers need at least {settings.min_relevance_score:.2f} (MIN_RELEVANCE_SCORE)."
@@ -259,11 +280,24 @@ if submitted:
                 f"quality checks (RESEARCH_MIN_QUALITY = {settings.research_min_quality:.2f})."
             )
     else:
+        if result.get("used_web_fallback"):
+            st.info("Your documents didn't cover this, so this answer comes from a web search.")
+        if result.get("evidence_verdict") == "contradictory":
+            st.warning("Your sources disagree about this. The answer describes each view.")
         st.markdown(result["answer"])
+        if result.get("grounded"):
+            st.success(
+                "✓ Checked: the local model judged every claim to be supported by the sources. "
+                "This check helps, but it is not a guarantee."
+            )
 
     sources = result.get("sources") or []
     if sources and not result.get("error"):
-        with st.expander(f"Document sources ({len(sources)}) · from your files", expanded=True):
+        if result.get("insufficient_evidence"):
+            sources_label = f"Related passages ({len(sources)}) · from your files, not enough for a reliable answer"
+        else:
+            sources_label = f"Document sources ({len(sources)}) · from your files"
+        with st.expander(sources_label, expanded=True):
             for number, chunk in enumerate(sources, start=1):
                 st.markdown(f"**[{number}] {chunk.citation}** · relevance {chunk.score:.2f}")
                 st.caption(textwrap.shorten(chunk.text, width=300, placeholder=" ..."))
@@ -275,6 +309,19 @@ if submitted:
     rejected = result.get("rejected_web_sources") or []
     if rejected and not result.get("error"):
         show_rejected_sources(rejected)
+
+    rejected_passages = result.get("rejected_sources") or []
+    if rejected_passages and not result.get("error"):
+        with st.expander(f"Passages judged not relevant ({len(rejected_passages)})"):
+            for chunk in rejected_passages:
+                st.markdown(f"**{chunk.citation}** · similarity {chunk.score:.2f}")
+                st.caption(textwrap.shorten(chunk.text, width=200, placeholder=" ..."))
+
+    corrections = result.get("corrections") or []
+    if corrections:
+        with st.expander("How the answer was checked (Self-RAG and Corrective RAG)"):
+            for number, note in enumerate(corrections, start=1):
+                st.markdown(f"{number}. {note}")
 
     with st.expander("Show LangGraph workflow steps"):
         st.write(" → ".join(result.get("steps", [])))

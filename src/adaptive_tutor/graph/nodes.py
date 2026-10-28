@@ -19,6 +19,7 @@ from adaptive_tutor.research.content_extraction import PageFetcher
 from adaptive_tutor.research.search_provider import SearchError, SearchProvider, WebResult, format_web_context
 from adaptive_tutor.research.search_query import clean_search_query
 from adaptive_tutor.research.source_verification import apply_hard_rules, score_results
+from adaptive_tutor.retrieval.corrective_rag import plan_retrieval
 from adaptive_tutor.retrieval.retriever import Retriever, format_context
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ GROUNDED_SYSTEM_PROMPT = (
 GROUNDED_PROMPT = ChatPromptTemplate.from_messages(
     [
         ("system", GROUNDED_SYSTEM_PROMPT),
-        ("human", "Context passages:\n\n{context}\n\nQuestion: {question}"),
+        ("human", "Context passages:\n\n{context}\n\nQuestion: {question}{extra_instructions}"),
     ]
 )
 
@@ -61,6 +62,12 @@ NO_EVIDENCE_MESSAGE = (
     "I couldn't find information about this in your uploaded documents, so I can't give "
     "a reliable answer from them. Try rephrasing the question, adding a document that "
     "covers this topic, or switching to General knowledge."
+)
+
+PARTIAL_EVIDENCE_MESSAGE = (
+    "I found passages in your documents that are related, but they don't contain enough "
+    "information to answer this reliably, so I won't guess. Open \"Related passages\" below "
+    "to read what I found, or add a document that covers this topic."
 )
 
 NO_DOCUMENTS_MESSAGE = (
@@ -96,7 +103,7 @@ WEB_GROUNDED_SYSTEM_PROMPT = (
 WEB_GROUNDED_PROMPT = ChatPromptTemplate.from_messages(
     [
         ("system", WEB_GROUNDED_SYSTEM_PROMPT),
-        ("human", "Web search results:\n\n{context}\n\nQuestion: {question}"),
+        ("human", "Web search results:\n\n{context}\n\nQuestion: {question}{extra_instructions}"),
     ]
 )
 
@@ -113,8 +120,36 @@ RESEARCH_DISABLED_MESSAGE = (
 
 UNEXPECTED_SEARCH_ERROR_MESSAGE = "Something unexpected went wrong during the web search. Check the terminal logs."
 
+NO_WEB_FALLBACK_EVIDENCE_MESSAGE = (
+    "Your documents didn't cover this, and the web search didn't find results good enough "
+    "to answer from either, so I can't give a reliable answer."
+)
 
-# ---------- Shared helper ----------
+# ----- Phase 4: extra instructions for the answer writers -----
+
+CONTRADICTION_INSTRUCTION = (
+    "Important: the sources disagree with each other about this. Do not pick a side. "
+    "Describe each view, cite the source for each one, and tell the learner that the sources disagree."
+)
+
+RETRY_INSTRUCTION = (
+    "Important: your previous answer was rejected because {problem}. Write a new answer that "
+    "uses ONLY facts stated in the sources, cites a source after every sentence, and leaves out "
+    "anything the sources don't say."
+)
+
+
+# ---------- Shared helpers ----------
+
+def _extra_instructions(state: TutorState) -> str:
+    """Phase 4 adds instructions after a failed check. Phase 2/3 answers get none ("")."""
+    parts = []
+    if state.get("evidence_verdict") == "contradictory":
+        parts.append(CONTRADICTION_INSTRUCTION)
+    if state.get("grounding_problem"):
+        parts.append(RETRY_INSTRUCTION.format(problem=state["grounding_problem"]))
+    return "\n\n" + "\n".join(parts) if parts else ""
+
 
 def _invoke_chain(chain: Runnable, inputs: dict[str, str], settings: Settings, step: str) -> dict[str, Any]:
     """Run a prompt -> model -> text chain and turn any failure into a friendly error."""
@@ -181,22 +216,36 @@ def make_retrieve_node(retriever: Retriever | None, settings: Settings) -> NodeF
         if retriever is None:
             return {"error": NO_RETRIEVER_MESSAGE, "steps": step}
 
+        # Phase 4: the first search is the normal one; retries use the corrective plan.
+        attempts = state.get("retrieval_attempts", 0)
+        plan = plan_retrieval(attempts, state["question"], state.get("retrieval_query"), settings)
         try:
             if retriever.document_count() == 0:
                 return {"error": NO_DOCUMENTS_MESSAGE, "steps": step}
-            chunks = retriever.search(state["question"])
+            if attempts == 0:
+                chunks = retriever.search(plan.query)
+            else:
+                chunks = retriever.search(plan.query, top_k=plan.top_k)
         except Exception as exc:  # noqa: BLE001 - embedding or database failures
             logger.exception("Document retrieval failed")
             return {"error": describe_llm_error(exc, settings, model_name=settings.embedding_model), "steps": step}
 
         # Keep only passages that are similar enough to the question.
-        relevant = [chunk for chunk in chunks if chunk.score >= settings.min_relevance_score]
+        relevant = [chunk for chunk in chunks if chunk.score >= plan.min_score]
         best_score = chunks[0].score if chunks else 0.0
         logger.info(
-            "Retrieved %d passages; %d passed the %.2f threshold (best score %.2f)",
-            len(chunks), len(relevant), settings.min_relevance_score, best_score,
+            "Search attempt %d: %d passages; %d passed the %.2f threshold (best score %.2f)",
+            plan.attempt, len(chunks), len(relevant), plan.min_score, best_score,
         )
-        return {"sources": relevant, "best_score": best_score, "steps": step}
+        result: dict[str, Any] = {
+            "sources": relevant,
+            "best_score": best_score,
+            "retrieval_attempts": attempts + 1,
+            "steps": step,
+        }
+        if state.get("check_evidence"):
+            result["corrections"] = [plan.describe(found=len(chunks), kept=len(relevant))]
+        return result
 
     return retrieve_documents
 
@@ -208,17 +257,26 @@ def make_generate_grounded_answer_node(llm: Runnable, settings: Settings) -> Nod
     def generate_grounded_answer(state: TutorState) -> dict[str, Any]:
         sources = state.get("sources", [])
         logger.info("Asking model '%s' with %d passages", settings.ollama_model, len(sources))
-        inputs = {"question": state["question"], "context": format_context(sources)}
-        return _invoke_chain(chain, inputs, settings, "generate_grounded_answer")
+        inputs = {
+            "question": state["question"],
+            "context": format_context(sources),
+            "extra_instructions": _extra_instructions(state),
+        }
+        result = _invoke_chain(chain, inputs, settings, "generate_grounded_answer")
+        result["answer_source"] = "documents"
+        result["answer_attempts"] = state.get("answer_attempts", 0) + 1
+        return result
 
     return generate_grounded_answer
 
 
 def report_insufficient_evidence(state: TutorState) -> dict[str, Any]:
     """The documents don't cover the question: say so honestly instead of guessing."""
-    logger.info("No passage was relevant enough; not calling the model")
+    logger.info("Not enough evidence in the documents; not writing an answer")
+    # Phase 4 can find related passages that still aren't enough to answer.
+    message = PARTIAL_EVIDENCE_MESSAGE if state.get("sources") else NO_EVIDENCE_MESSAGE
     return {
-        "answer": NO_EVIDENCE_MESSAGE,
+        "answer": message,
         "insufficient_evidence": True,
         "steps": ["report_insufficient_evidence"],
     }
@@ -310,8 +368,15 @@ def make_generate_web_answer_node(llm: Runnable, settings: Settings) -> NodeFunc
     def generate_web_answer(state: TutorState) -> dict[str, Any]:
         web_sources = state.get("web_sources", [])
         logger.info("Asking model '%s' with %d web results", settings.ollama_model, len(web_sources))
-        inputs = {"question": state["question"], "context": format_web_context(web_sources)}
-        return _invoke_chain(chain, inputs, settings, "generate_web_answer")
+        inputs = {
+            "question": state["question"],
+            "context": format_web_context(web_sources),
+            "extra_instructions": _extra_instructions(state),
+        }
+        result = _invoke_chain(chain, inputs, settings, "generate_web_answer")
+        result["answer_source"] = "web"
+        result["answer_attempts"] = state.get("answer_attempts", 0) + 1
+        return result
 
     return generate_web_answer
 
@@ -319,8 +384,9 @@ def make_generate_web_answer_node(llm: Runnable, settings: Settings) -> NodeFunc
 def report_no_web_results(state: TutorState) -> dict[str, Any]:
     """Nothing usable was found online: say so honestly instead of guessing."""
     logger.info("No web result passed the quality checks; not calling the model")
+    message = NO_WEB_FALLBACK_EVIDENCE_MESSAGE if state.get("used_web_fallback") else NO_WEB_EVIDENCE_MESSAGE
     return {
-        "answer": NO_WEB_EVIDENCE_MESSAGE,
+        "answer": message,
         "insufficient_evidence": True,
         "steps": ["report_no_web_results"],
     }
@@ -350,10 +416,13 @@ def route_after_validation(
 
 def route_after_retrieval(
     state: TutorState,
-) -> Literal["generate_grounded_answer", "report_insufficient_evidence", "handle_error"]:
-    """Error -> error. No relevant passages -> say so. Otherwise answer from them."""
+) -> Literal["grade_documents", "generate_grounded_answer", "report_insufficient_evidence", "handle_error"]:
+    """Error -> error. Checking on -> grade the passages (Phase 4).
+    No relevant passages -> say so. Otherwise answer from them."""
     if state.get("error"):
         return "handle_error"
+    if state.get("check_evidence"):
+        return "grade_documents"
     if not state.get("sources"):
         return "report_insufficient_evidence"
     return "generate_grounded_answer"
@@ -366,15 +435,23 @@ def route_after_search_query(state: TutorState) -> Literal["search_web", "handle
 
 def route_after_web_search(
     state: TutorState,
-) -> Literal["generate_web_answer", "report_no_web_results", "handle_error"]:
-    """Error -> error. No good results -> say so. Otherwise answer from them."""
+) -> Literal["grade_web_results", "generate_web_answer", "report_no_web_results", "handle_error"]:
+    """Error -> error. No good results -> say so. Checking on -> grade them (Phase 4).
+    Otherwise answer from them."""
     if state.get("error"):
         return "handle_error"
     if not state.get("web_sources"):
         return "report_no_web_results"
+    if state.get("check_evidence"):
+        return "grade_web_results"
     return "generate_web_answer"
 
 
 def route_after_generation(state: TutorState) -> str:
-    """Finish normally, or go to error handling."""
-    return "handle_error" if state.get("error") else END
+    """Error -> error. Checking on -> check the answer (Phase 4). Otherwise finish."""
+    if state.get("error"):
+        return "handle_error"
+    # Only answers built from sources can be checked against sources.
+    if state.get("check_evidence") and state.get("answer_source"):
+        return "check_answer"
+    return END
